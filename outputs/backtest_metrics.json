@@ -1,0 +1,14 @@
+{
+  "pd_rl_policy": {
+    "cumulative_return": 0.0,
+    "annualized_return": 0.0,
+    "sharpe_ratio": 0.0,
+    "max_drawdown": 0.0
+  },
+  "buy_and_hold": {
+    "cumulative_return": 1.0590099999999998,
+    "annualized_return": 1.3407488418818327,
+    "sharpe_ratio": 3.1160191407826763,
+    "max_drawdown": -0.1259875198245068
+  }
+}
