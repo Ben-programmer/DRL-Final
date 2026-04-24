@@ -94,3 +94,12 @@ PD alignment reward:
 - This is an MVP for research and prototyping.
 - It is **not** investment advice.
 - Replace the sample data with real market data for meaningful evaluation.
+
+## Deployment (GitHub Pages)
+This project includes a GitHub Actions workflow (`.github/workflows/deploy.yml`) to automatically build and deploy the React frontend (`frontend-ui`) to GitHub Pages.
+
+To enable deployment:
+1. Go to your repository settings on GitHub.
+2. Navigate to **Pages** (under Code and automation).
+3. Under **Build and deployment**, set the **Source** to **GitHub Actions**.
+4. Push your code to the `main` or `master` branch, and the Action will automatically build and publish your frontend.

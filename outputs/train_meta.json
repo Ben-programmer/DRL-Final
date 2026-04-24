@@ -2,5 +2,5 @@
   "train_rows": 1000,
   "val_rows": 214,
   "test_rows": 215,
-  "data_path": "C:\\Users\\user\\Downloads\\pd_rl_trading_mvp\\data\\sample_data.csv"
+  "data_path": "/Users/benlu/Desktop/NCHU/02-資訊工程學系/114-2/深度強化學習/DRL-Final/data/sample_data.csv"
 }

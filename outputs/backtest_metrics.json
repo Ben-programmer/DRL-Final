@@ -7,8 +7,8 @@
   },
   "buy_and_hold": {
     "cumulative_return": 1.0590099999999998,
-    "annualized_return": 1.3407488418818327,
-    "sharpe_ratio": 3.1160191407826763,
+    "annualized_return": 1.3315078809971799,
+    "sharpe_ratio": 3.1085182475265647,
     "max_drawdown": -0.1259875198245068
   }
 }
