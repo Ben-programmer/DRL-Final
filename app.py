@@ -84,7 +84,7 @@ def main():
         interval_option = st.selectbox("時間級別", ["1h", "2h", "4h", "1d", "1wk", "1mo"], index=4)
     with col_btn:
         st.write("") # 對齊用
-        start_btn = st.button("▶ 獲取資料並分析", use_container_width=False)
+        start_btn = st.button("▶ 獲取資料並分析", width='content')
 
     st.divider()
 
@@ -115,6 +115,10 @@ def main():
         if not ticker:
             st.warning("請輸入股票代號")
             return
+        
+        # 按下分析時，清除舊的訓練紀錄，確保右側報告區重置
+        st.session_state.pop("model_ret", None)
+        
         with st.spinner("強制獲取過去 2 年的小時級別資料中..."):
             raw_df = load_data_raw(ticker)
             if raw_df is not None:
@@ -212,7 +216,7 @@ def main():
         fig.update_layout(height=550, margin=dict(l=0, r=0, t=30, b=0), xaxis_rangeslider_visible=False, xaxis_type="category", title="SMC Price Action")
         fig.update_xaxes(type="category", nticks=10)
         
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
     train_btn = train_btn_placeholder.button(f"🚀 使用當前 {interval_option} 週期資料訓練 DRL 模型")
 
@@ -258,6 +262,9 @@ def main():
     ret = st.session_state.get("model_ret", {})
     if not ret and not train_btn:
         log_placeholder.info("等待新的模型訓練...")
+        report_placeholder.info("⏳ 等待模型訓練完成...")
+        return
+        
     report_placeholder.info("🧠 進行最新一筆資料推論...")
     agent = DQNAgent(state_dim=cfg.state_dim, action_dim=cfg.action_dim)
     if cfg.model_path.exists():
