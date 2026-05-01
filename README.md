@@ -1,6 +1,6 @@
 # 📈 SMC × DRL Trading Platform
 
-[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://114-2-drl-final.streamlit.app/)
+DEMO SITE:[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://114-2-drl-final.streamlit.app/)
 
 此專案結合了**深度強化學習 (Deep Reinforcement Learning, DRL)** 與 **聰明錢概念 (Smart Money Concepts, SMC)**，建立一個具有高度互動性圖形介面與即時訓練追蹤的自動化量化交易輔助系統。
 
