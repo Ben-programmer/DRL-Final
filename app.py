@@ -1,8 +1,9 @@
-import streamlit as st
+﻿import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
 import plotly.graph_objects as plotly_go
+import datetime
 from config import Config, ACTION_NAMES
 from train import run_training_pipeline
 from recommend import recommend_strategy
@@ -246,13 +247,25 @@ def main():
     </style>
     """, unsafe_allow_html=True)
 
+    # 計算今天與一年前的日期
+    today = datetime.date.today()
+    try:
+        one_year_ago = today.replace(year=today.year - 1)
+    except ValueError:
+        # 處理 2/29 閏年問題
+        one_year_ago = today.replace(year=today.year - 1, day=28)
+
+    st.info(f"💡 Hint: To ensure data accuracy, the current search range is limited to the past year. ({one_year_ago.strftime('%Y/%m/%d')} ~ {today.strftime('%Y/%m/%d')})")
+
     col_input1, col_input2, col_input3, col_btn1, col_btn2 = st.columns([2.5, 1.5, 1.5, 0.7, 1.0])
     with col_input1:
         ticker = st.text_input("Ticker (e.g. AAPL, 2330.TW)", value="")
     with col_input2:
-        start_date = st.date_input("Start Date", value=pd.to_datetime(cfg.start_date))
+        default_start = st.session_state.get("start_date_input", one_year_ago)
+        start_date = st.date_input("Start Date", value=default_start, min_value=one_year_ago, max_value=today)
     with col_input3:
-        end_date = st.date_input("End Date", value=pd.to_datetime(cfg.end_date))
+        default_end = st.session_state.get("end_date_input", today)
+        end_date = st.date_input("End Date", value=max(default_end, start_date), min_value=start_date, max_value=today)
     with col_btn1:
         start_btn = st.button("Fetch & Analyze")
     with col_btn2:
@@ -262,28 +275,40 @@ def main():
         st.session_state.clear()
         st.rerun()
 
-    # yfinance 1h intraday 資料限制約 730 天
-    date_diff = (pd.to_datetime(end_date) - pd.to_datetime(start_date)).days
-    if date_diff > 730:
-        st.warning(f"Date range is {date_diff} days, exceeding yfinance 1H intraday limit (approx. 730 days). Data might be incomplete.")
+    if "fetch_warning" in st.session_state:
+        st.warning(st.session_state.pop("fetch_warning"))
 
     st.divider()
 
-    # ── SMC 圖表（全寬）──
-    st.subheader("SMC Stock Chart")
-    render_chart()
+    # ── 建立左右兩欄排版 ──
+    main_col_left, main_col_right = st.columns([5.5, 4.5])
 
-    st.divider()
+    # ── 左欄：SMC 圖表與其相關控制 ──
+    with main_col_left:
+        st.subheader("SMC Stock Chart")
+        render_chart()
 
-    # ── 分析建議報告（全寬）──
-    st.subheader("DRL × SMC Report")
-    report_placeholder = st.empty()
+        st.divider()
 
-    # ── DRL 訓練 Log（全寬）──
-    log_container = st.container(border=True)
-    log_container.subheader("DQN Training Log")
-    log_placeholder = log_container.empty()
-    train_btn_placeholder = log_container.empty()
+    # ── 右欄：訓練與分析區塊 (所有控制、報表、Log) ──
+    with main_col_right:
+        title_col, btn_col = st.columns([5.5, 4.5])
+        with title_col:
+            st.subheader("DRL × SMC Analysis")
+        
+        with btn_col:
+            # 訓練按鈕直接放在右側頂部，與標題同一列
+            train_btn_placeholder = st.empty()
+        
+        # 可滾動的報表與 Log 區塊
+        with st.container(height=800):
+            report_placeholder = st.empty()
+            
+            st.divider()
+            
+            log_container = st.container()
+            log_container.markdown("#### DQN Training Log")
+            log_placeholder = log_container.empty()
 
     if start_btn:
         if not ticker:
@@ -292,7 +317,17 @@ def main():
         st.session_state.pop("model_ret", None)
         with st.spinner(f"Fetching 1H data from {start_date} to {end_date}..."):
             raw_df = load_data_raw(ticker, start_date, end_date)
-            if raw_df is not None:
+            if raw_df is not None and not raw_df.empty:
+                # 自動修正起始日期 (若歷史資料不足)
+                actual_start = raw_df['date'].min().date()
+                if actual_start > start_date:
+                    st.session_state["start_date_input"] = actual_start
+                    st.session_state["fetch_warning"] = f"⚠️ 自動修正：此標的歷史 1H 資料最早僅能追溯至 {actual_start.strftime('%Y/%m/%d')}，已為您調整起始日期。"
+                    start_date = actual_start
+                else:
+                    st.session_state["start_date_input"] = start_date
+
+                st.session_state["end_date_input"] = end_date
                 st.session_state["raw_df"] = raw_df
                 st.session_state["ticker"] = ticker
                 st.session_state["start_date"] = str(start_date)
@@ -311,7 +346,8 @@ def main():
     ticker = st.session_state.get("ticker", "UNKNOWN")
 
     # ── Training ──
-    train_btn = train_btn_placeholder.button(f"DQN + SMC + MTF + RRR ({ticker})")
+    # 將訓練按鈕繪製
+    train_btn = train_btn_placeholder.button(f"🚀 DQN + SMC + MTF + RRR ({ticker})", use_container_width=True)
 
     if train_btn:
         log_status = log_container.empty()
@@ -378,48 +414,47 @@ def main():
         rr = recommendation["risk_reward_plan"]
         snap = recommendation["mtf_snapshot"]
 
-        # 清除 placeholder，改用四欄排版
+        # 清除 placeholder，重新渲染報表
         report_placeholder.empty()
-
-        r1, r2, r3, r4 = st.columns(4)
-        with r1:
-            st.markdown(f"""
-##### Recommendation
-* **Close**: {recommendation['latest_close']:,.2f}
-* **Action**: **{recommendation['best_action_name']}**
-* **Direction**: {recommendation['trade_direction']}
-* **Position**: {recommendation['target_position_ratio']:.0%}
-            """)
-        with r2:
-            st.markdown(f"""
-##### MTF SMC
-* W1 bias: {snap['w1_smc_bias']:.0f}
-* D1 bias: {snap['d1_smc_bias']:.0f}
-* H4 bias: {snap['h4_smc_bias']:.0f}
-* H1 bias: {snap['h1_smc_bias']:.0f}
-* Confluence: {snap['mtf_confluence_score']:.1f}
-* Conflict: {'Yes' if snap['mtf_conflict'] else 'No'}
-            """)
-        with r3:
-            st.markdown(f"""
-##### Backtest
-* Return: {metrics.get('total_return', 0)*100:.1f}%
-* Drawdown: {metrics.get('max_drawdown', 0)*100:.1f}%
-* Sharpe: {metrics.get('sharpe_ratio', 0):.2f}
-* Profit Factor: {metrics.get('profit_factor', 0):.2f}
-            """)
-        with r4:
+        
+        with report_placeholder.container():
+            st.markdown("### 🎯 核心交易結論 (Action Plan)")
+            m1, m2 = st.columns(2)
+            m1.metric(label="✅ DRL 推薦動作", value=recommendation['best_action_name'], delta=recommendation['trade_direction'], delta_color="off")
+            m2.metric(label="💼 建議倉位", value=f"{recommendation['target_position_ratio']:.0%}")
+            
+            m3, m4 = st.columns(2)
             if rr.get("risk_reward_valid"):
-                st.markdown(f"""
-##### RRR
-* Entry: {rr['entry_price']:,.2f}
-* Stop Loss: {rr['stop_loss_price']:,.2f}
-* Take Profit: {rr['take_profit_price']:,.2f}
-* RR Ratio: **{rr['risk_reward_ratio']:.2f}**
-* Basis: {rr.get('take_profit_basis', '')}
-                """)
+                m3.metric(label="⚖️ 預期盈虧比 (RR Ratio)", value=f"{rr['risk_reward_ratio']:.2f}")
             else:
-                st.markdown("##### RRR\n*No valid RRR*")
+                m3.metric(label="⚖️ 預期盈虧比 (RR Ratio)", value="N/A")
+            m4.metric(label="💲 回測獲利", value=f"{metrics.get('total_return', 0)*100:.1f}%", delta=f"Sharpe: {metrics.get('sharpe_ratio', 0):.2f}")
+
+            st.markdown("---")
+            st.markdown("#### 📊 進階分析細節 (Detailed Breakdown)")
+            
+            with st.expander("🛡️ 風險控管水準 (Prices)", expanded=True):
+                if rr.get("risk_reward_valid"):
+                    st.markdown(f"""
+                    * **當前價格 (Close)**: `{recommendation['latest_close']:,.2f}`
+                    * **進場參考 (Entry)**: `{rr['entry_price']:,.2f}`
+                    * **停損水位 (Stop Loss)**: `{rr['stop_loss_price']:,.2f}`
+                    * **停利水位 (Take Profit)**: `{rr['take_profit_price']:,.2f}`
+                    * **停利依據**: {rr.get('take_profit_basis', '')}
+                    """)
+                else:
+                    st.markdown("*當前無有效的進出場風控計畫*")
+            
+            with st.expander("🧭 多時區 SMC 共識 (MTF Bias) & 📈 回測細節", expanded=True):
+                st.markdown(f"""
+                **MTF 偏誤**: W1 ({snap['w1_smc_bias']:.0f}) | D1 ({snap['d1_smc_bias']:.0f}) | H4 ({snap['h4_smc_bias']:.0f}) | H1 ({snap['h1_smc_bias']:.0f})
+                * **共識分數**: `{snap['mtf_confluence_score']:.1f}` | **方向衝突**: `{'是 (Yes)' if snap['mtf_conflict'] else '否 (No)'}`
+                
+                **模型 Test Set Metrics**:
+                * 累積報酬: `{metrics.get('total_return', 0)*100:.1f}%`
+                * 最大回撤: `{metrics.get('max_drawdown', 0)*100:.1f}%`
+                * 獲利因子: `{metrics.get('profit_factor', 0):.2f}`
+                """)
 
     except Exception as e:
         report_placeholder.error(f"Inference failed: {e}")

@@ -380,9 +380,18 @@ def build_mtf_dataset(df_h1_raw, df_d1_raw, cfg):
     out = merge_asof_higher_tf(df_h1_feat, df_h4_feat, h4_cols)
     out = merge_asof_higher_tf(out, df_d1_feat, d1_cols)
     out = merge_asof_higher_tf(out, df_w1_feat, w1_cols)
-    out = out.replace([np.inf, -np.inf], np.nan).dropna()
+    out = out.replace([np.inf, -np.inf], np.nan)
+    out = out.bfill().ffill().fillna(0) # 避免新標的沒有長線資料時被 dropna 刪光
+    
     out = add_mtf_confluence_features(out)
-    out = out.replace([np.inf, -np.inf], np.nan).dropna()
+    out = out.replace([np.inf, -np.inf], np.nan).bfill().ffill().fillna(0)
+    
+    # 將 MTF 訓練區間切齊回使用者指定的原 start_date
+    start_dt = pd.to_datetime(cfg.start_date)
+    if start_dt.tz is None and out.index.tz is not None:
+        start_dt = start_dt.tz_localize(out.index.tz)
+    out = out[out.index >= start_dt]
+    
     return out
 
 
@@ -390,8 +399,13 @@ def download_and_build_mtf(cfg, progress_callback=None):
     """Download data and build full MTF dataset."""
     if progress_callback:
         progress_callback("Downloading H1 data...")
+        
+    # 往前多抓 60 天的資料，作為計算 H1 / H4 指標 (如 sma_60 等) 的暖機期 (Warm-up)，
+    # 確保不會因為 dropna 連帶刪掉了使用者指定的分析區間。
+    h1_fetch_start = str((pd.to_datetime(cfg.start_date) - pd.Timedelta(days=60)).date())
+    
     df_h1_raw = download_ohlcv_with_fallback(
-        ticker=cfg.ticker, start=cfg.start_date, end=cfg.end_date,
+        ticker=cfg.ticker, start=h1_fetch_start, end=cfg.end_date,
         interval=cfg.base_interval, fallback_periods=cfg.intraday_fallback_periods,
     )
 
