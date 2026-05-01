@@ -227,7 +227,7 @@ def main():
         html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
     </style>
     <div style="padding: 1.2rem 0 0.6rem 0; border-bottom: 2px solid #E0E0E0; margin-bottom: 1.5rem; text-align: center;">
-        <h1 style="margin: 0; font-size: 2.4rem; font-weight: 700; color: #1A1A2E; font-family: 'Inter', sans-serif;">
+        <h1 style="margin: 0; font-size: 3.4rem; font-weight: 700; color: #1A1A2E; font-family: 'Inter', sans-serif;">
             SMC × DRL Trading Platform
         </h1>
         <p style="margin: 0.3rem 0 0 0; font-size: 0.95rem; color: #666; font-family: 'Inter', sans-serif;">
@@ -270,7 +270,7 @@ def main():
     st.divider()
 
     # ── SMC 圖表（全寬）──
-    st.subheader("SMC Price Action")
+    st.subheader("SMC Stock Chart")
     render_chart()
 
     st.divider()

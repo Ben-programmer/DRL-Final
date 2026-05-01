@@ -1,5 +1,7 @@
 # 📈 SMC × DRL Trading Platform
 
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://114-2-drl-final.streamlit.app/)
+
 此專案結合了**深度強化學習 (Deep Reinforcement Learning, DRL)** 與 **聰明錢概念 (Smart Money Concepts, SMC)**，建立一個具有高度互動性圖形介面與即時訓練追蹤的自動化量化交易輔助系統。
 
 透過擷取多時間級別（Multi-Timeframe: W1, D1, H4, H1）的市場微觀結構特徵，系統輔助 Deep Q-Network (DQN) 代理人學習最佳資金部位管理策略，並自動推算最佳風險報酬比 (Risk-Reward Ratio, RRR) 交易計畫。
