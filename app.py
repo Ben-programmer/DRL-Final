@@ -1,313 +1,428 @@
-﻿import streamlit as st
+import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
 import plotly.graph_objects as plotly_go
-from plotly.subplots import make_subplots
-import datetime
-from config import Config
-from train import run_training_from_df
-from agent.dqn_agent import DQNAgent
-
-from utils.data_utils import prepare_data_from_df
+from config import Config, ACTION_NAMES
+from train import run_training_pipeline
+from recommend import recommend_strategy
+from utils.data_utils import FEATURE_COLUMNS, prepare_data_for_chart
 
 # 設定頁面配置 (必須是第一個 Streamlit 指令)
-st.set_page_config(page_title="SMC & DRL Prediction Platform", layout="wide")
+st.set_page_config(page_title="SMC × DRL Trading Platform", layout="wide")
 
 # 初始化設定
 cfg = Config()
 
-def load_data_raw(ticker):
+def load_data_raw(ticker, start_date, end_date):
     try:
-        # 強制抓取兩年小時級別資料
-        df = yf.download(ticker, period="730d", interval="1h")
+        df = yf.download(ticker, start=str(start_date), end=str(end_date), interval="1h")
         if df.empty:
             return None
-        
-        # 處理 yf 回傳的 MultiIndex
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.droplevel(1)
-            
         df = df.reset_index()
-        # 統一欄位名稱
         rename_map = {"Date": "date", "Datetime": "date", "Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume"}
         df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns}, inplace=True)
-        
-        # 轉換為台灣時間 (Asia/Taipei)
         if pd.api.types.is_datetime64_any_dtype(df['date']):
             if df['date'].dt.tz is not None:
-                # 若帶有時區，直接轉換成台北時間，並移除時區標籤以利後續運算
                 df['date'] = df['date'].dt.tz_convert('Asia/Taipei').dt.tz_localize(None)
             else:
-                # 若沒有時區標籤，預設當作 UTC 處理後再轉
                 df['date'] = df['date'].dt.tz_localize('UTC').dt.tz_convert('Asia/Taipei').dt.tz_localize(None)
-                
         return df
     except Exception as e:
-        st.error(f"資料獲取失敗: {e}")
+        st.error(f"Failed to fetch data: {e}")
         return None
 
-def process_data(raw_df, interval, rolling_window):
+def process_data_for_chart(raw_df, interval, rolling_window):
+    """Process data with smartmoneyconcepts for chart display."""
     df = raw_df.copy()
     df.set_index("date", inplace=True)
-    
-    if interval == "1h":
-        pass
-    elif interval == "2h":
-        df = df.resample('2h').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}).dropna()
-    elif interval == "4h":
-        df = df.resample('4h').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}).dropna()
-    elif interval == "1d":
-        df = df.resample('D').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}).dropna()
-    elif interval == "1wk":
-        # 週線以週一為起始
-        df = df.resample('W-MON').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}).dropna()
-    elif interval == "1mo":
-        df = df.resample('ME').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}).dropna()
-        
+    resample_rules = {"1h": None, "4h": "4h", "1d": "D", "1wk": "W-MON"}
+    rule = resample_rules.get(interval)
+    if rule:
+        df = df.resample(rule).agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}).dropna()
     df.reset_index(inplace=True)
-    
-    # 檢查長度是否足夠計算 SMC
     if len(df) < rolling_window:
-        st.warning(f"當前資料數量 ({len(df)}) 小於設定的滾動窗口 ({rolling_window})，這可能導致計算 SMC 特徵失敗。")
-        
-    # 使用 data_utils 準備包含 SMC 數據
-    df = prepare_data_from_df(df, rolling_window=rolling_window)
+        st.warning(f"Current data count ({len(df)}) is less than rolling window ({rolling_window})")
+    df = prepare_data_for_chart(df, rolling_window=rolling_window)
     return df
 
+# ── 圖表渲染 Fragment（切換時區不會觸發整頁 rerun）──
+@st.fragment
+def render_chart():
+    """圖表 Fragment：內部自行讀取資料並建立 UI，確保 fragment rerun 時正常更新。"""
+    raw_df = st.session_state.get("raw_df")
+    if raw_df is None:
+        st.info("Waiting for data to render chart...")
+        return
+
+    interval_map = {"1h (H1)": "1h", "4h (H4)": "4h", "1d (D1)": "1d", "1wk (W1)": "1wk"}
+    chart_tf = st.selectbox("Chart Timeframe", list(interval_map.keys()), index=0, key="chart_tf")
+    interval_option = interval_map[chart_tf]
+
+    with st.spinner(f"Aggregating {chart_tf} timeframe and calculating SMC features..."):
+        try:
+            df = process_data_for_chart(raw_df, interval_option, cfg.rolling_window)
+        except Exception as e:
+            st.error(f"Data conversion or SMC calculation failed: {e}")
+            return
+
+    fig = plotly_go.Figure()
+    if interval_option in ['1h', '4h']:
+        df['date_str'] = df['date'].dt.strftime('%Y-%m-%d %H:%M')
+    else:
+        df['date_str'] = df['date'].dt.strftime('%Y-%m-%d')
+
+    fig.add_trace(plotly_go.Candlestick(x=df['date_str'], open=df['open'], high=df['high'], low=df['low'], close=df['close'], name='Candlesticks'))
+
+    # Old Highs / Old Lows
+    if 'old_high' in df.columns:
+        fig.add_trace(plotly_go.Scatter(x=df['date_str'], y=df['old_high'], mode='lines', name='Old High (BSL)', line=dict(color='red', width=1, dash='dash')))
+        fig.add_trace(plotly_go.Scatter(x=df['date_str'], y=df['old_low'], mode='lines', name='Old Low (SSL)', line=dict(color='green', width=1, dash='dash')))
+
+    # Order Block
+    if "ob" in df.columns:
+        ob_pos_x, ob_pos_y, ob_neg_x, ob_neg_y = [], [], [], []
+        for i, row in df[df['ob'] != 0].iterrows():
+            x0 = row['date_str']
+            x1 = df['date_str'].iloc[-1] if i == len(df)-1 else df['date_str'].iloc[min(i+10, len(df)-1)]
+            y0 = row.get('ob_bottom', row['low'])
+            y1 = row.get('ob_top', row['high'])
+            if row['ob'] < 0:
+                ob_neg_x.extend([x0, x0, x1, x1, None])
+                ob_neg_y.extend([y0, y1, y1, y0, None])
+            else:
+                ob_pos_x.extend([x0, x0, x1, x1, None])
+                ob_pos_y.extend([y0, y1, y1, y0, None])
+        if ob_pos_x:
+            fig.add_trace(plotly_go.Scatter(x=ob_pos_x, y=ob_pos_y, fill='toself', fillcolor='rgba(0, 255, 0, 0.2)', mode='lines', line=dict(width=0), name='+ OB (Bullish)'))
+        if ob_neg_x:
+            fig.add_trace(plotly_go.Scatter(x=ob_neg_x, y=ob_neg_y, fill='toself', fillcolor='rgba(255, 0, 0, 0.2)', mode='lines', line=dict(width=0), name='- OB (Bearish)'))
+
+    # FVG
+    if "fvg" in df.columns:
+        fvg_pos_x, fvg_pos_y, fvg_neg_x, fvg_neg_y = [], [], [], []
+        for i, row in df[df['fvg'] != 0].iterrows():
+            x0 = row['date_str']
+            x1 = df['date_str'].iloc[-1] if i == len(df)-1 else df['date_str'].iloc[min(i+3, len(df)-1)]
+            y0 = row.get('fvg_bottom', row['low'])
+            y1 = row.get('fvg_top', row['high'])
+            if row['fvg'] < 0:
+                fvg_neg_x.extend([x0, x0, x1, x1, None])
+                fvg_neg_y.extend([y0, y1, y1, y0, None])
+            else:
+                fvg_pos_x.extend([x0, x0, x1, x1, None])
+                fvg_pos_y.extend([y0, y1, y1, y0, None])
+        if fvg_pos_x:
+            fig.add_trace(plotly_go.Scatter(x=fvg_pos_x, y=fvg_pos_y, fill='toself', fillcolor='rgba(0, 191, 255, 0.2)', mode='lines', line=dict(width=0), name='+ FVG (Bullish Gap)'))
+        if fvg_neg_x:
+            fig.add_trace(plotly_go.Scatter(x=fvg_neg_x, y=fvg_neg_y, fill='toself', fillcolor='rgba(255, 165, 0, 0.2)', mode='lines', line=dict(width=0), name='- FVG (Bearish Gap)'))
+
+    # Liquidity
+    if "liq_swept" in df.columns:
+        liq_df = df[df['liq_swept'] != 0]
+        if not liq_df.empty:
+            fig.add_trace(plotly_go.Scatter(x=liq_df['date_str'], y=liq_df['high'] * 1.01, mode='markers', name='Liquidity Swept', marker=dict(symbol='x', color='purple', size=8)))
+
+    # ── DRL 測試集交易標記 ──
+    ret_data = st.session_state.get("model_ret", {})
+    bt_data = ret_data.get("test_backtest", {}) if ret_data else {}
+    bt_trades_df = bt_data.get("trades_df") if bt_data else None
+
+    if bt_trades_df is not None and not bt_trades_df.empty:
+        def _nearest_candle(trade_dt):
+            """找到圖表中最接近交易時間的 K 線。"""
+            t = pd.Timestamp(trade_dt)
+            diffs = (df['date'] - t).abs()
+            idx = diffs.idxmin()
+            return df.loc[idx, 'date_str'], df.loc[idx, 'low'], df.loc[idx, 'high']
+
+        # ── 所有 BUY 標記 ──
+        buy_rows = bt_trades_df[bt_trades_df['type'] == 'BUY']
+        if not buy_rows.empty:
+            bx, by, bc = [], [], []
+            for _, t in buy_rows.iterrows():
+                ds, low, _ = _nearest_candle(t['datetime'])
+                bx.append(ds); by.append(low * 0.995)
+                bc.append([str(t['datetime'])[:16], f"{t['price']:,.2f}", f"{t['value']:,.0f}", f"{t['cost']:,.2f}"])
+            fig.add_trace(plotly_go.Scatter(
+                x=bx, y=by, mode='markers', name='BUY Trade',
+                marker=dict(symbol='triangle-up', color='#00E676', size=10, line=dict(color='white', width=1)),
+                customdata=bc,
+                hovertemplate='<b>BUY</b><br>Time: %{customdata[0]}<br>Price: %{customdata[1]}<br>Value: %{customdata[2]}<br>Fee: %{customdata[3]}<extra></extra>',
+            ))
+
+        # ── 所有 SELL 標記 ──
+        sell_rows = bt_trades_df[bt_trades_df['type'] == 'SELL']
+        if not sell_rows.empty:
+            sx, sy, sc = [], [], []
+            for _, t in sell_rows.iterrows():
+                ds, _, high = _nearest_candle(t['datetime'])
+                sx.append(ds); sy.append(high * 1.005)
+                sc.append([str(t['datetime'])[:16], f"{t['price']:,.2f}", f"{t['value']:,.0f}", f"{t['cost']:,.2f}"])
+            fig.add_trace(plotly_go.Scatter(
+                x=sx, y=sy, mode='markers', name='SELL Trade',
+                marker=dict(symbol='triangle-down', color='#FF5252', size=10, line=dict(color='white', width=1)),
+                customdata=sc,
+                hovertemplate='<b>SELL</b><br>Time: %{customdata[0]}<br>Price: %{customdata[1]}<br>Value: %{customdata[2]}<br>Fee: %{customdata[3]}<extra></extra>',
+            ))
+
+        # ── 配對 BUY→SELL，計算 RRR，標記最佳/最差 ──
+        pairs = []
+        buy_entry = None
+        for _, row in bt_trades_df.iterrows():
+            if row['type'] == 'BUY' and buy_entry is None:
+                buy_entry = row
+            elif row['type'] == 'SELL' and buy_entry is not None:
+                ret = row['price'] / buy_entry['price'] - 1.0
+                pairs.append({'buy_dt': buy_entry['datetime'], 'buy_price': buy_entry['price'],
+                              'sell_dt': row['datetime'], 'sell_price': row['price'], 'return': ret})
+                buy_entry = None
+
+        if len(pairs) >= 1:
+            best = max(pairs, key=lambda p: p['return'])
+            worst = min(pairs, key=lambda p: p['return'])
+            highlights = [(best, 'Best RRR', 'gold')]
+            if best is not worst:
+                highlights.append((worst, 'Worst RRR', '#FF1744'))
+
+            for pair, label, clr in highlights:
+                bds, _, _ = _nearest_candle(pair['buy_dt'])
+                sds, _, _ = _nearest_candle(pair['sell_dt'])
+                fig.add_trace(plotly_go.Scatter(
+                    x=[bds, sds], y=[pair['buy_price'], pair['sell_price']],
+                    mode='markers+lines+text',
+                    marker=dict(symbol='star', color=clr, size=16, line=dict(color='black', width=1.5)),
+                    line=dict(color=clr, width=2, dash='dot'),
+                    text=[f"BUY {pair['buy_price']:,.1f}", f"SELL {pair['sell_price']:,.1f}"],
+                    textposition=['bottom center', 'top center'],
+                    textfont=dict(color=clr, size=9),
+                    customdata=[[label, f"BUY @ {pair['buy_price']:,.2f}", f"{pair['return']:.2%}"],
+                                [label, f"SELL @ {pair['sell_price']:,.2f}", f"{pair['return']:.2%}"]],
+                    hovertemplate='<b>%{customdata[0]}</b><br>%{customdata[1]}<br>Return: %{customdata[2]}<extra></extra>',
+                    name=label,
+                ))
+
+    fig.update_layout(height=550, margin=dict(l=0, r=0, t=30, b=0), xaxis_rangeslider_visible=False, xaxis_type="category", title="SMC Price Action")
+    fig.update_xaxes(type="category", nticks=10)
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _render_log_html(log_messages):
+    """共用的 log HTML 渲染函式。"""
+    display_text = "\n".join(log_messages)
+    return f"""
+    <div style="background-color: #F8F9FA; color: #1A1A2E; padding: 12px 16px; border-radius: 8px; font-family: 'SF Mono', Consolas, monospace; font-size: 13px; height: 280px; display: flex; flex-direction: column-reverse; overflow-y: auto; border: 1px solid #E0E0E0;">
+        <div style="white-space: pre-wrap;">{display_text}</div>
+    </div>
+    """
+
+
 def main():
-    # 頂部列
-    col_input1, col_input2, col_btn = st.columns([2, 1.5, 1])
+    # ── Header ──
+    st.markdown("""
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
+    </style>
+    <div style="padding: 1.2rem 0 0.6rem 0; border-bottom: 2px solid #E0E0E0; margin-bottom: 1.5rem; text-align: center;">
+        <h1 style="margin: 0; font-size: 2.4rem; font-weight: 700; color: #1A1A2E; font-family: 'Inter', sans-serif;">
+            SMC × DRL Trading Platform
+        </h1>
+        <p style="margin: 0.3rem 0 0 0; font-size: 0.95rem; color: #666; font-family: 'Inter', sans-serif;">
+            Smart Money Concepts × Deep Reinforcement Learning — Multi-Timeframe Analysis & Strategy
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # 讓按鈕與輸入欄位垂直對齊
+    st.markdown("""
+    <style>
+    div[data-testid="stHorizontalBlock"] > div:nth-child(4) button,
+    div[data-testid="stHorizontalBlock"] > div:nth-child(5) button {
+        margin-top: 1.65rem;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    col_input1, col_input2, col_input3, col_btn1, col_btn2 = st.columns([2.5, 1.5, 1.5, 0.7, 1.0])
     with col_input1:
-        ticker = st.text_input("選擇資料來源 (股票代號 EX. AAPL or 2330.TW)", value="")
+        ticker = st.text_input("Ticker (e.g. AAPL, 2330.TW)", value="")
     with col_input2:
-        interval_option = st.selectbox("時間級別", ["1h", "2h", "4h", "1d", "1wk", "1mo"], index=4)
-    with col_btn:
-        st.write("") # 對齊用
-        start_btn = st.button("▶ 獲取資料並分析", width='content')
+        start_date = st.date_input("Start Date", value=pd.to_datetime(cfg.start_date))
+    with col_input3:
+        end_date = st.date_input("End Date", value=pd.to_datetime(cfg.end_date))
+    with col_btn1:
+        start_btn = st.button("Fetch & Analyze")
+    with col_btn2:
+        reset_btn = st.button("Reset / Clear")
+
+    if reset_btn:
+        st.session_state.clear()
+        st.rerun()
+
+    # yfinance 1h intraday 資料限制約 730 天
+    date_diff = (pd.to_datetime(end_date) - pd.to_datetime(start_date)).days
+    if date_diff > 730:
+        st.warning(f"Date range is {date_diff} days, exceeding yfinance 1H intraday limit (approx. 730 days). Data might be incomplete.")
 
     st.divider()
 
-    # 主要版面分割
-    col_left, col_right = st.columns([2.5, 1])
+    # ── SMC 圖表（全寬）──
+    st.subheader("SMC Price Action")
+    render_chart()
 
-    with col_left:
-        # 圖表區
-        chart_container = st.container(border=True)
-        chart_container.write("📄 SMC (Smart Money Concepts) 盤面解析")
-        chart_placeholder = chart_container.empty()
-        
-    with col_right:
-        # 報告區
-        report_container = st.container(border=True)
-        # 設定固定高度
-        report_container.write("📄 分析建議報告")
-        report_placeholder = report_container.empty()
+    st.divider()
 
-    # 訓練狀態區移到下方全寬
+    # ── 分析建議報告（全寬）──
+    st.subheader("DRL × SMC Report")
+    report_placeholder = st.empty()
+
+    # ── DRL 訓練 Log（全寬）──
     log_container = st.container(border=True)
-    log_container.write("💻 DRL 模型訓練動態 Log")
+    log_container.subheader("DQN Training Log")
     log_placeholder = log_container.empty()
     train_btn_placeholder = log_container.empty()
-        
-    # 初始化畫面
+
     if start_btn:
         if not ticker:
-            st.warning("請輸入股票代號")
+            st.warning("Please enter a ticker symbol")
             return
-        
-        # 按下分析時，清除舊的訓練紀錄，確保右側報告區重置
         st.session_state.pop("model_ret", None)
-        
-        with st.spinner("強制獲取過去 2 年的小時級別資料中..."):
-            raw_df = load_data_raw(ticker)
+        with st.spinner(f"Fetching 1H data from {start_date} to {end_date}..."):
+            raw_df = load_data_raw(ticker, start_date, end_date)
             if raw_df is not None:
                 st.session_state["raw_df"] = raw_df
                 st.session_state["ticker"] = ticker
+                st.session_state["start_date"] = str(start_date)
+                st.session_state["end_date"] = str(end_date)
+                st.rerun()
             else:
-                st.error("無法獲取股票資料，請檢查代號。")
+                st.error("Failed to fetch stock data, please check ticker or date range.")
                 return
 
     if "raw_df" not in st.session_state:
-        chart_placeholder.info("等待抓取資料繪製圖表...")
-        log_placeholder.info("等待訓練開始...")
-        report_placeholder.info("等待模型訓練完成...")
+        log_placeholder.info("Waiting for training...")
+        report_placeholder.info("Waiting for model training...")
         return
-        
+
     raw_df = st.session_state["raw_df"]
     ticker = st.session_state.get("ticker", "UNKNOWN")
-    
-    with chart_placeholder.container():
-        with st.spinner(f"正在組合 {interval_option} 級別並計算 SMC 特徵..."):
-            try:
-                df = process_data(raw_df, interval_option, cfg.rolling_window)
-            except Exception as e:
-                st.error(f"資料轉換或 SMC 計算失敗: {e}")
-                return
-            
-    # 繪圖
-    with chart_placeholder.container():
-        # 改為單一主圖
-        fig = plotly_go.Figure()
-        
-        if interval_option in ['1h', '2h', '4h']:
-            df['date_str'] = df['date'].dt.strftime('%Y-%m-%d %H:%M')
-        else:
-            df['date_str'] = df['date'].dt.strftime('%Y-%m-%d')
-        
-        # K線圖
-        fig.add_trace(plotly_go.Candlestick(x=df['date_str'], open=df['open'], high=df['high'], low=df['low'], close=df['close'], name='K線'))
-        
-        # 標示 Old Highs (阻力) / Old Lows (支撐)
-        fig.add_trace(plotly_go.Scatter(x=df['date_str'], y=df['old_high'], mode='lines', name='Old High (BSL)', line=dict(color='red', width=1, dash='dash')))
-        fig.add_trace(plotly_go.Scatter(x=df['date_str'], y=df['old_low'], mode='lines', name='Old Low (SSL)', line=dict(color='green', width=1, dash='dash')))
-            
-        # 標示 Order Block - 改用 filled Scatter 取代 shape 以支援圖例開關
-        if "ob" in df.columns:
-            ob_pos_x, ob_pos_y, ob_neg_x, ob_neg_y = [], [], [], []
-            for i, row in df[df['ob'] != 0].iterrows():
-                x0 = row['date_str']
-                x1 = df['date_str'].iloc[-1] if i == len(df)-1 else df['date_str'].iloc[min(i+10, len(df)-1)]
-                y0 = row.get('ob_bottom', row['low'])
-                y1 = row.get('ob_top', row['high'])
-                
-                if row['ob'] < 0:
-                    ob_neg_x.extend([x0, x0, x1, x1, None])
-                    ob_neg_y.extend([y0, y1, y1, y0, None])
-                else:
-                    ob_pos_x.extend([x0, x0, x1, x1, None])
-                    ob_pos_y.extend([y0, y1, y1, y0, None])
-                    
-            if ob_pos_x:
-                fig.add_trace(plotly_go.Scatter(x=ob_pos_x, y=ob_pos_y, fill='toself', fillcolor='rgba(0, 255, 0, 0.2)', mode='lines', line=dict(width=0), name='+ OB (看漲)'))
-            if ob_neg_x:
-                fig.add_trace(plotly_go.Scatter(x=ob_neg_x, y=ob_neg_y, fill='toself', fillcolor='rgba(255, 0, 0, 0.2)', mode='lines', line=dict(width=0), name='- OB (看跌)'))
 
-        # 標示 Fair Value Gap - 改用 filled Scatter 取代 shape 以支援圖例開關
-        if "fvg" in df.columns:
-            fvg_pos_x, fvg_pos_y, fvg_neg_x, fvg_neg_y = [], [], [], []
-            for i, row in df[df['fvg'] != 0].iterrows():
-                x0 = row['date_str']
-                x1 = df['date_str'].iloc[-1] if i == len(df)-1 else df['date_str'].iloc[min(i+3, len(df)-1)]
-                y0 = row.get('fvg_bottom', row['low'])
-                y1 = row.get('fvg_top', row['high'])
-                
-                if row['fvg'] < 0:
-                    fvg_neg_x.extend([x0, x0, x1, x1, None])
-                    fvg_neg_y.extend([y0, y1, y1, y0, None])
-                else:
-                    fvg_pos_x.extend([x0, x0, x1, x1, None])
-                    fvg_pos_y.extend([y0, y1, y1, y0, None])
-                    
-            if fvg_pos_x:
-                fig.add_trace(plotly_go.Scatter(x=fvg_pos_x, y=fvg_pos_y, fill='toself', fillcolor='rgba(0, 191, 255, 0.2)', mode='lines', line=dict(width=0), name='+ FVG (向上缺口)'))
-            if fvg_neg_x:
-                fig.add_trace(plotly_go.Scatter(x=fvg_neg_x, y=fvg_neg_y, fill='toself', fillcolor='rgba(255, 165, 0, 0.2)', mode='lines', line=dict(width=0), name='- FVG (向下缺口)'))
-
-        # 標示 Liquidity Pools
-        if "liq_swept" in df.columns:
-            liq_df = df[df['liq_swept'] != 0]
-            if not liq_df.empty:
-                fig.add_trace(plotly_go.Scatter(x=liq_df['date_str'], y=liq_df['high'] * 1.01, mode='markers', name='Liquidity Swept', marker=dict(symbol='x', color='purple', size=8)))
-            else:
-                # 即使沒發生也加個空標示提醒使用者該區間內沒有觸發
-                fig.add_trace(plotly_go.Scatter(x=[df['date_str'].iloc[0]], y=[np.nan], mode='markers', name='無流動性獵取', marker=dict(symbol='x', color='purple', size=8)))
-        
-        fig.update_layout(height=550, margin=dict(l=0, r=0, t=30, b=0), xaxis_rangeslider_visible=False, xaxis_type="category", title="SMC Price Action")
-        fig.update_xaxes(type="category", nticks=10)
-        
-        st.plotly_chart(fig, width='stretch')
-
-    train_btn = train_btn_placeholder.button(f"🚀 使用當前 {interval_option} 週期資料訓練 DRL 模型")
+    # ── Training ──
+    train_btn = train_btn_placeholder.button(f"DQN + SMC + MTF + RRR ({ticker})")
 
     if train_btn:
-        # 模型訓練
-        # 為了避免被 overwrite，我們在原本的 container 中建立獨立的區塊
         log_status = log_container.empty()
         log_area = log_container.empty()
-        
-        log_status.info("🚀 開始進行 DRL 模型訓練...")
-        
-        # 建立具備固定高度且可滑動的動態 Log 視窗
-        log_messages = []
+        log_status.info("Starting MTF DQN+SMC training...")
 
+        st.session_state["train_log"] = []
         def update_log(msg):
-            log_messages.append(msg)
-            # 透過 HTML 與 CSS column-reverse 技巧，讓捲軸永遠保持在最底部
-            display_text = "\n".join(log_messages)
-            html_code = f"""
-            <div style="background-color: #1e1e1e; color: #00ff00; padding: 10px; border-radius: 5px; font-family: Consolas, monospace; font-size: 14px; height: 280px; display: flex; flex-direction: column-reverse; overflow-y: auto; border: 1px solid #444;">
-                <div style="white-space: pre-wrap;">{display_text}</div>
-            </div>
-            """
-            log_area.markdown(html_code, unsafe_allow_html=True)
-        
+            st.session_state["train_log"].append(msg)
+            log_area.markdown(_render_log_html(st.session_state["train_log"]), unsafe_allow_html=True)
+
         try:
-            ret = run_training_from_df(df, cfg, progress_callback=update_log)
-            # 更新 Session State
+            train_cfg = Config()
+            train_cfg.ticker = ticker
+            train_cfg.start_date = st.session_state.get("start_date", cfg.start_date)
+            train_cfg.end_date = st.session_state.get("end_date", cfg.end_date)
+            ret = run_training_pipeline(train_cfg, progress_callback=update_log)
             st.session_state["model_ret"] = ret
-            
-            # 訓練完成後，在 log 區額外加上完成資訊
-            final_msg = f"✅ 訓練完成！勝率: {ret.get('win_rate', 0)*100:.1f}% | 夏普值: {ret.get('sharpe_ratio', 0):.2f}"
+            metrics = ret["metrics"]
+            final_msg = f"Training Completed! Total Return: {metrics.get('total_return', 0)*100:.1f}% | Sharpe: {metrics.get('sharpe_ratio', 0):.2f}"
             update_log(final_msg)
-            
-            # 將狀態從 info 改為 success，不覆蓋下方的 code 區塊
-            log_status.success("✅ 訓練已儲存至模型中！")
-            
+            log_status.success("Training saved successfully!")
+            st.rerun()
         except Exception as e:
-            log_status.error(f"❌ 訓練中發生錯誤: {e}")
+            log_status.error(f"Error during training: {e}")
+            import traceback
+            update_log(traceback.format_exc())
             return
-            
-    # 模型推論與報告
+
+    # ── 恢復已保存的訓練 Log ──
+    saved_log = st.session_state.get("train_log", [])
+    if saved_log and not train_btn:
+        log_area = log_container.empty()
+        log_area.markdown(_render_log_html(saved_log), unsafe_allow_html=True)
+
+    # ── Report ──
     ret = st.session_state.get("model_ret", {})
     if not ret and not train_btn:
-        log_placeholder.info("等待新的模型訓練...")
-        report_placeholder.info("⏳ 等待模型訓練完成...")
+        if not saved_log:
+            log_placeholder.info("Waiting for new training...")
+        report_placeholder.info("Waiting for model training...")
         return
-        
-    report_placeholder.info("🧠 進行最新一筆資料推論...")
-    agent = DQNAgent(state_dim=cfg.state_dim, action_dim=cfg.action_dim)
-    if cfg.model_path.exists():
-        agent.load(str(cfg.model_path))
-        
-    latest_action = 0
-    dummy_state = np.zeros(cfg.state_dim)
-    if cfg.state_dim >= 12:
-        dummy_state[0] = df["pd_pos"].iloc[-1]
-        dummy_state[1] = df["is_premium"].iloc[-1]
-        dummy_state[2] = df["is_discount"].iloc[-1]
-        dummy_state[7] = df["fvg"].iloc[-1]
-        dummy_state[8] = df["ob"].iloc[-1]
-        dummy_state[9] = df["liq_swept"].iloc[-1]
-        dummy_state[10] = df["dist_old_high"].iloc[-1]
-        dummy_state[11] = df["dist_old_low"].iloc[-1]
 
+    if not ret:
+        return
+
+    report_placeholder.info("Running strategy inference...")
     try:
-        latest_action = agent.select_action(dummy_state, greedy=True)
-    except Exception as e:
-        latest_action = 0
+        agent = ret["agent"]
+        mtf_df = ret["mtf_df"]
+        feature_mean = ret["feature_mean"]
+        feature_std = ret["feature_std"]
+        metrics = ret["metrics"]
 
-    action_map = {0: "⚪ 持有 (Hold)", 1: "🟢 買入 (Buy)", 2: "🔴 賣出 (Sell)"}
-    
-    # 判斷趨勢或狀態
-    smc_status = []
-    if df["is_premium"].iloc[-1]: smc_status.append("Premium")
-    if df["is_discount"].iloc[-1]: smc_status.append("Discount")
-    if df["liq_swept"].iloc[-1] != 0: smc_status.append("Liquidity Swept")
-    
-    report_md = f"""
-    ### 📝 **{ticker}** SMC 報告
-    
-    * **資料日期**: {df['date'].iloc[-1].strftime('%Y-%m-%d')}
-    * **最新收盤價**: {df['close'].iloc[-1]:,.2f}
-    * **目前 SMC 狀態**: {', '.join(smc_status) if smc_status else 'Equilibrium'}
-    * **模型建議動作**: **{action_map.get(latest_action, '未知')}**
-    
-    ---
-    **模型成效概要**:
-    勝率 {ret.get('win_rate', 0)*100:.1f}%, 夏普值 {ret.get('sharpe_ratio', 0):.2f}, 最終獲利 {ret.get('total_reward', 0):,.2f}
-    """
-    report_placeholder.markdown(report_md)
+        recommendation = recommend_strategy(
+            agent=agent,
+            latest_mtf_raw=mtf_df,
+            cfg=cfg,
+            feature_cols=FEATURE_COLUMNS,
+            feature_mean=feature_mean,
+            feature_std=feature_std,
+        )
+
+        rr = recommendation["risk_reward_plan"]
+        snap = recommendation["mtf_snapshot"]
+
+        # 清除 placeholder，改用四欄排版
+        report_placeholder.empty()
+
+        r1, r2, r3, r4 = st.columns(4)
+        with r1:
+            st.markdown(f"""
+##### Recommendation
+* **Close**: {recommendation['latest_close']:,.2f}
+* **Action**: **{recommendation['best_action_name']}**
+* **Direction**: {recommendation['trade_direction']}
+* **Position**: {recommendation['target_position_ratio']:.0%}
+            """)
+        with r2:
+            st.markdown(f"""
+##### MTF SMC
+* W1 bias: {snap['w1_smc_bias']:.0f}
+* D1 bias: {snap['d1_smc_bias']:.0f}
+* H4 bias: {snap['h4_smc_bias']:.0f}
+* H1 bias: {snap['h1_smc_bias']:.0f}
+* Confluence: {snap['mtf_confluence_score']:.1f}
+* Conflict: {'Yes' if snap['mtf_conflict'] else 'No'}
+            """)
+        with r3:
+            st.markdown(f"""
+##### Backtest
+* Return: {metrics.get('total_return', 0)*100:.1f}%
+* Drawdown: {metrics.get('max_drawdown', 0)*100:.1f}%
+* Sharpe: {metrics.get('sharpe_ratio', 0):.2f}
+* Profit Factor: {metrics.get('profit_factor', 0):.2f}
+            """)
+        with r4:
+            if rr.get("risk_reward_valid"):
+                st.markdown(f"""
+##### RRR
+* Entry: {rr['entry_price']:,.2f}
+* Stop Loss: {rr['stop_loss_price']:,.2f}
+* Take Profit: {rr['take_profit_price']:,.2f}
+* RR Ratio: **{rr['risk_reward_ratio']:.2f}**
+* Basis: {rr.get('take_profit_basis', '')}
+                """)
+            else:
+                st.markdown("##### RRR\n*No valid RRR*")
+
+    except Exception as e:
+        report_placeholder.error(f"Inference failed: {e}")
 
 if __name__ == '__main__':
     main()
