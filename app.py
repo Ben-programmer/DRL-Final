@@ -596,14 +596,10 @@ def main():
 
         metrics = ret.get("metrics", {})
 
-        col_btn, col_clear, _ = st.columns([1, 1, 4])
+        btn_label = "🔄 重新生成" if st.session_state.get("ai_comment") else "✨ 生成 AI 評語"
+        col_btn, _ = st.columns([1, 5])
         with col_btn:
-            gen_btn = st.button("✨ 生成 AI 評語", use_container_width=True)
-        with col_clear:
-            if st.session_state.get("ai_comment"):
-                if st.button("🔄 重新生成", use_container_width=True):
-                    st.session_state.pop("ai_comment", None)
-                    st.rerun()
+            gen_btn = st.button(btn_label, use_container_width=True)
 
         if gen_btn:
             with st.spinner("AI 分析中，請稍候..."):
