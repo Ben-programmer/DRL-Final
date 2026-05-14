@@ -311,9 +311,9 @@ def main():
     with col_input1:
         ticker = st.text_input("Ticker (e.g. AAPL, 2330.TW)", value="")
     with col_input2:
-        start_date = st.date_input("Start Date", value=pd.to_datetime(cfg.start_date))
+        start_date = st.date_input("Start Date", value=pd.to_datetime(st.session_state.get("start_date", cfg.start_date)))
     with col_input3:
-        end_date = st.date_input("End Date", value=pd.to_datetime(cfg.end_date))
+        end_date = st.date_input("End Date", value=pd.to_datetime(st.session_state.get("end_date", cfg.end_date)))
     with col_btn1:
         start_btn = st.button("Fetch & Analyze")
     with col_btn2:
@@ -330,6 +330,9 @@ def main():
 
     st.divider()
 
+    if "data_range_warning" in st.session_state:
+        st.warning(st.session_state["data_range_warning"])
+
     # 先預先計算 recommendation，讓 render_chart 可以讀取到 RRR 資料
     ret = st.session_state.get("model_ret", {})
     if ret:
@@ -344,15 +347,54 @@ def main():
 
     st.divider()
 
-    # ── 分析建議報告（全寬）──
-    st.subheader("DRL × SMC Report")
-    report_placeholder = st.empty()
+    # ── Tab 狀態初始化 ──
+    if "active_tab" not in st.session_state:
+        st.session_state["active_tab"] = "training"
+    active_tab = st.session_state["active_tab"]
 
-    # ── DRL 訓練 Log（全寬）──
-    log_container = st.container(border=True)
-    log_container.subheader("DQN Training Log")
-    log_placeholder = log_container.empty()
-    train_btn_placeholder = log_container.empty()
+    # ── Tab 導覽列 ──
+    # 用 #tab-nav-anchor 錨點讓 CSS 只作用在緊接著的 column 容器
+    st.markdown("""
+    <style>
+    #tab-nav-anchor + div[data-testid="stHorizontalBlock"] button {
+        background: transparent !important;
+        border: none !important;
+        border-bottom: 3px solid transparent !important;
+        border-radius: 0 !important;
+        box-shadow: none !important;
+        color: #888 !important;
+        font-weight: 500 !important;
+        font-size: 0.95rem !important;
+        padding: 0.5rem 1.2rem !important;
+        transition: color 0.15s, border-color 0.15s;
+    }
+    #tab-nav-anchor + div[data-testid="stHorizontalBlock"] button[data-testid="stBaseButton-primary"] {
+        color: #1A1A2E !important;
+        border-bottom: 3px solid #1A1A2E !important;
+        font-weight: 600 !important;
+    }
+    #tab-nav-anchor + div[data-testid="stHorizontalBlock"] button[data-testid="stBaseButton-secondary"]:hover {
+        color: #444 !important;
+        border-bottom-color: #BDBDBD !important;
+        background: transparent !important;
+    }
+    </style>
+    <div id="tab-nav-anchor"></div>
+    """, unsafe_allow_html=True)
+
+    tab_col1, tab_col2, _ = st.columns([0.9, 1.1, 4])
+    with tab_col1:
+        if st.button("🤖 DQN Training Log", use_container_width=True, key="tab_training",
+                     type="primary" if active_tab == "training" else "secondary"):
+            st.session_state["active_tab"] = "training"
+            st.rerun()
+    with tab_col2:
+        if st.button("📊 DRL × SMC Report", use_container_width=True, key="tab_report",
+                     type="primary" if active_tab == "report" else "secondary"):
+            st.session_state["active_tab"] = "report"
+            st.rerun()
+
+    st.markdown('<div style="border-top: 2px solid #E0E0E0; margin: -0.5rem 0 1rem 0;"></div>', unsafe_allow_html=True)
 
     if start_btn:
         if not ticker:
@@ -362,107 +404,121 @@ def main():
         with st.spinner(f"Fetching 1H data from {start_date} to {end_date}..."):
             raw_df = load_data_raw(ticker, start_date, end_date)
             if raw_df is not None:
+                actual_start = str(raw_df["date"].min().date())
+                actual_end = str(raw_df["date"].max().date())
                 st.session_state["raw_df"] = raw_df
                 st.session_state["ticker"] = ticker
-                st.session_state["start_date"] = str(start_date)
-                st.session_state["end_date"] = str(end_date)
+                st.session_state["start_date"] = actual_start
+                st.session_state["end_date"] = actual_end
+                if actual_start != str(start_date):
+                    st.session_state["data_range_warning"] = (
+                        f"{ticker} 實際資料從 **{actual_start}** 開始（請求 {start_date}）。"
+                        f"訓練將使用實際可用範圍：{actual_start} ~ {actual_end}。"
+                        f"若股票歷史不足 14 個月，訓練可能仍會失敗（W1 SMA-60 需要 60 週資料）。"
+                    )
+                else:
+                    st.session_state.pop("data_range_warning", None)
                 st.rerun()
             else:
                 st.error("Failed to fetch stock data, please check ticker or date range.")
                 return
 
     if "raw_df" not in st.session_state:
-        log_placeholder.info("Waiting for training...")
-        report_placeholder.info("Waiting for model training...")
+        st.info("Waiting for data and model training...")
         return
 
     raw_df = st.session_state["raw_df"]
     ticker = st.session_state.get("ticker", "UNKNOWN")
 
-    # ── Training ──
-    btn_container = train_btn_placeholder.container()
-    btn_col1, btn_col2 = btn_container.columns(2)
-    with btn_col1:
-        train_btn = st.button(f"DQN + SMC + MTF + RRR ({ticker})", use_container_width=True)
-    with btn_col2:
-        train_v2_btn = st.button(f"V2: DQN + SMC + MTF + RRR (Advanced) ({ticker})", use_container_width=True)
+    # ── DQN Training Log Tab ──
+    if active_tab == "training":
+        log_container = st.container(border=True)
+        log_container.subheader("DQN Training Log")
+        log_placeholder = log_container.empty()
+        train_btn_placeholder = log_container.empty()
 
-    if train_btn or train_v2_btn:
-        if not ticker or ticker.strip() == "":
-            st.error("Please enter a Ticker (e.g., AAPL or 2330.TW) in the input box before training.")
-            return
+        btn_container = train_btn_placeholder.container()
+        btn_col1, btn_col2 = btn_container.columns(2)
+        with btn_col1:
+            train_btn = st.button(f"DQN + SMC + MTF + RRR ({ticker})", use_container_width=True)
+        with btn_col2:
+            train_v2_btn = st.button(f"V2: DQN + SMC + MTF + RRR (Advanced) ({ticker})", use_container_width=True)
 
-        log_status = log_container.empty()
-        log_area = log_container.empty()
-        log_status.info("Starting MTF DQN+SMC training...")
+        if train_btn or train_v2_btn:
+            if not ticker or ticker.strip() == "":
+                st.error("Please enter a Ticker (e.g., AAPL or 2330.TW) in the input box before training.")
+                return
 
-        st.session_state["train_log"] = []
-        def update_log(msg):
-            st.session_state["train_log"].append(msg)
-            log_area.markdown(_render_log_html(st.session_state["train_log"]), unsafe_allow_html=True)
+            log_status = log_container.empty()
+            log_area = log_container.empty()
+            log_status.info("Starting MTF DQN+SMC training...")
 
-        try:
-            train_cfg = Config()
-            train_cfg.ticker = ticker
-            train_cfg.start_date = st.session_state.get("start_date", cfg.start_date)
-            train_cfg.end_date = st.session_state.get("end_date", cfg.end_date)
-            if train_v2_btn:
-                ret = run_training_pipeline_v2(train_cfg, progress_callback=update_log)
-            else:
-                ret = run_training_pipeline(train_cfg, progress_callback=update_log)
-            st.session_state["model_ret"] = ret
-            metrics = ret["metrics"]
-            final_msg = f"Training Completed! Total Return: {metrics.get('total_return', 0)*100:.1f}% | Sharpe: {metrics.get('sharpe_ratio', 0):.2f}"
-            update_log(final_msg)
-            log_status.success("Training saved successfully!")
-            st.rerun()
-        except Exception as e:
-            log_status.error(f"Error during training: {e}")
-            import traceback
-            update_log(traceback.format_exc())
-            return
+            st.session_state["train_log"] = []
+            def update_log(msg):
+                st.session_state["train_log"].append(msg)
+                log_area.markdown(_render_log_html(st.session_state["train_log"]), unsafe_allow_html=True)
 
-    # ── 恢復已保存的訓練 Log ──
-    saved_log = st.session_state.get("train_log", [])
-    if saved_log and not (train_btn or train_v2_btn):
-        log_area = log_container.empty()
-        log_area.markdown(_render_log_html(saved_log), unsafe_allow_html=True)
+            try:
+                train_cfg = Config()
+                train_cfg.ticker = ticker
+                train_cfg.start_date = st.session_state.get("start_date", cfg.start_date)
+                train_cfg.end_date = st.session_state.get("end_date", cfg.end_date)
+                if train_v2_btn:
+                    ret = run_training_pipeline_v2(train_cfg, progress_callback=update_log)
+                else:
+                    ret = run_training_pipeline(train_cfg, progress_callback=update_log)
+                st.session_state["model_ret"] = ret
+                metrics = ret["metrics"]
+                final_msg = f"Training Completed! Total Return: {metrics.get('total_return', 0)*100:.1f}% | Sharpe: {metrics.get('sharpe_ratio', 0):.2f}"
+                update_log(final_msg)
+                log_status.success("Training saved successfully!")
+                st.session_state["active_tab"] = "report"
+                st.rerun()
+            except Exception as e:
+                log_status.error(f"Error during training: {e}")
+                import traceback
+                update_log(traceback.format_exc())
+                return
 
-    # ── Report ──
-    ret = st.session_state.get("model_ret", {})
-    if not ret and not (train_btn or train_v2_btn):
-        if not saved_log:
+        saved_log = st.session_state.get("train_log", [])
+        if saved_log and not (train_btn or train_v2_btn):
+            log_area = log_container.empty()
+            log_area.markdown(_render_log_html(saved_log), unsafe_allow_html=True)
+        elif not saved_log:
             log_placeholder.info("Waiting for new training...")
-        report_placeholder.info("Waiting for model training...")
-        return
 
-    if not ret:
-        return
+    # ── DRL × SMC Report Tab ──
+    elif active_tab == "report":
+        ret = st.session_state.get("model_ret", {})
+        if not ret:
+            st.info("Waiting for model training...")
+            return
 
-    report_placeholder.info("Running strategy inference...")
-    try:
-        recommendation = st.session_state.get("recommendation")
-        if not recommendation:
-            recommendation = compute_recommendation(ret, cfg)
+        st.subheader("DRL × SMC Report")
+        report_placeholder = st.empty()
+        report_placeholder.info("Running strategy inference...")
+        try:
+            recommendation = st.session_state.get("recommendation")
+            if not recommendation:
+                recommendation = compute_recommendation(ret, cfg)
 
-        rr = recommendation["risk_reward_plan"]
-        snap = recommendation["mtf_snapshot"]
-        metrics = ret["metrics"]
+            rr = recommendation["risk_reward_plan"]
+            snap = recommendation["mtf_snapshot"]
+            metrics = ret["metrics"]
 
-        # 清除 placeholder，改用四欄排版
-        report_placeholder.empty()
+            report_placeholder.empty()
 
-        r1, r2, r3, r4 = st.columns(4)
-        with r1:
-            st.markdown(f"""
+            r1, r2, r3, r4 = st.columns(4)
+            with r1:
+                st.markdown(f"""
 ##### Recommendation
 * **Close**: {recommendation['latest_close']:,.2f}
 * **Action**: **{recommendation['best_action_name']}**
 * **Direction**: {recommendation['trade_direction']}
 * **Position**: {recommendation['target_position_ratio']:.0%}
-            """)
-        with r2:
-            st.markdown(f"""
+                """)
+            with r2:
+                st.markdown(f"""
 ##### MTF SMC
 * W1 bias: {snap['w1_smc_bias']:.0f}
 * D1 bias: {snap['d1_smc_bias']:.0f}
@@ -470,49 +526,49 @@ def main():
 * H1 bias: {snap['h1_smc_bias']:.0f}
 * Confluence: {snap['mtf_confluence_score']:.1f}
 * Conflict: {'Yes' if snap['mtf_conflict'] else 'No'}
-            """)
-        with r3:
-            st.markdown(f"""
+                """)
+            with r3:
+                st.markdown(f"""
 ##### Backtest
 * Return: {metrics.get('total_return', 0)*100:.1f}%
 * Drawdown: {metrics.get('max_drawdown', 0)*100:.1f}%
 * Sharpe: {metrics.get('sharpe_ratio', 0):.2f}
 * Profit Factor: {metrics.get('profit_factor', 0):.2f}
-            """)
-        with r4:
-            if rr.get("risk_reward_valid"):
-                st.markdown(f"""
+                """)
+            with r4:
+                if rr.get("risk_reward_valid"):
+                    st.markdown(f"""
 ##### Current Target RRR
 * Entry: {rr['entry_price']:,.2f}
 * Stop Loss: {rr['stop_loss_price']:,.2f}
 * Take Profit: {rr['take_profit_price']:,.2f}
 * RR Ratio: **{rr['risk_reward_ratio']:.2f}**
 * Basis: {rr.get('take_profit_basis', '')}
-                """)
-            else:
-                st.markdown("##### Current Target RRR\n*No valid RRR*")
+                    """)
+                else:
+                    st.markdown("##### Current Target RRR\n*No valid RRR*")
 
-        if "rr_details" in snap:
-            st.markdown("---")
-            st.markdown("#### MTF Risk Reward Analysis")
-            rr_cols = st.columns(4)
-            for i, tf in enumerate(["w1", "d1", "h4", "h1"]):
-                with rr_cols[i]:
-                    tf_rr = snap["rr_details"][tf]
-                    st.markdown(f"##### {tf.upper()} Level")
-                    if pd.notna(tf_rr["entry"]):
-                        st.markdown(f"""
+            if "rr_details" in snap:
+                st.markdown("---")
+                st.markdown("#### MTF Risk Reward Analysis")
+                rr_cols = st.columns(4)
+                for i, tf in enumerate(["w1", "d1", "h4", "h1"]):
+                    with rr_cols[i]:
+                        tf_rr = snap["rr_details"][tf]
+                        st.markdown(f"##### {tf.upper()} Level")
+                        if pd.notna(tf_rr["entry"]):
+                            st.markdown(f"""
 * **Entry**: {tf_rr['entry']:,.2f}
 * **Stop Loss**: {tf_rr['stop_loss']:,.2f}
 * **Take Profit**: {tf_rr['take_profit']:,.2f}
 * **RR Ratio**: **{tf_rr['rr_ratio']:.2f}**
 * **Basis**: {tf_rr['basis']}
-                        """)
-                    else:
-                        st.markdown("*No valid setup*")
+                            """)
+                        else:
+                            st.markdown("*No valid setup*")
 
-    except Exception as e:
-        report_placeholder.error(f"Inference failed: {e}")
+        except Exception as e:
+            st.error(f"Inference failed: {e}")
 
 if __name__ == '__main__':
     main()

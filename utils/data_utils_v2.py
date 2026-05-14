@@ -654,12 +654,35 @@ def download_and_build_mtf(cfg, progress_callback=None):
         interval="1d", fallback_periods=("10y", "5y", "2y", "1y"),
     )
 
+    # ── W1 歷史資料預檢（快速失敗，避免等完整 MTF 計算後才報錯）──
+    df_w1_check = resample_ohlcv(df_d1_raw, "1W")
+    w1_bars = len(df_w1_check)
+    if w1_bars < 60:
+        d1_listing = df_d1_raw.index.min().date()
+        min_end_date = (df_d1_raw.index.min() + pd.Timedelta(weeks=60)).date()
+        raise ValueError(
+            f"W1 history too short: only {w1_bars} weekly bars (need ≥ 60, ≈14 months).\n"
+            f"  D1 data starts: {d1_listing}\n\n"
+            f"Suggested fix:\n"
+            f"  ✦ Keep this stock → set End Date to at least {min_end_date}\n"
+            f"  ✦ Or choose a stock listed before "
+            f"{(df_h1_raw.index.max() - pd.Timedelta(weeks=60)).date()}"
+        )
+
     if progress_callback:
-        progress_callback("Building MTF features (V2)...")
+        progress_callback(f"Building MTF features (V2)... (W1: {w1_bars} bars ✓)")
     mtf_df = build_mtf_dataset(df_h1_raw, df_d1_raw, cfg)
 
     if len(mtf_df) == 0:
-        raise ValueError("The built MTF dataset is empty. This usually happens if the Ticker is invalid or yfinance did not return enough data for the date range.")
+        h1_start = df_h1_raw.index.min().date()
+        d1_start = df_d1_raw.index.min().date()
+        raise ValueError(
+            f"MTF dataset is empty after feature calculation and NaN removal.\n"
+            f"  H1 data: {h1_start} ~ {df_h1_raw.index.max().date()} ({len(df_h1_raw)} bars)\n"
+            f"  D1 data: {d1_start} ~ {df_d1_raw.index.max().date()} ({len(df_d1_raw)} bars)\n"
+            f"  W1 bars: {w1_bars}\n"
+            f"This may indicate gaps or insufficient density in the H1 data."
+        )
 
     missing = [c for c in FEATURE_COLUMNS if c not in mtf_df.columns]
     if missing:
